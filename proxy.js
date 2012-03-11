@@ -124,7 +124,14 @@ function authenticate(request){
 //handle 2 rules:
 //  * redirect (301)
 //  * proxyto
-function handle_proxy_rule(rule, target, token){
+//  * forcessl
+function handle_proxy_rule(rule, target, token, ssl){
+  //handle https enforcement
+  if("forcessl" in rule && !ssl){
+    target.action = "forcessl";
+    return target;
+  }
+  
   //handle authorization
   if("validuser" in rule){
       if(!(token.login in rule.validuser) || (rule.validuser[token.login] != token.pass)){
@@ -145,7 +152,7 @@ function handle_proxy_rule(rule, target, token){
   return target;
 }
 
-function handle_proxy_route(host, token) {
+function handle_proxy_route(host, token, ssl) {
     //extract target host and port
     action = decode_host(host);
     action.action="proxyto";//default action
@@ -153,16 +160,16 @@ function handle_proxy_route(host, token) {
     //try to find a matching rule
     if(action.host+':'+action.port in hostfilters){//rule of the form "foo.domain.tld:port"
       rule=hostfilters[action.host+':'+action.port];
-      action=handle_proxy_rule(rule, action, token);
+      action=handle_proxy_rule(rule, action, token, ssl);
     }else if (action.host in hostfilters){//rule of the form "foo.domain.tld"
       rule=hostfilters[action.host];
-      action=handle_proxy_rule(rule, action, token);
+      action=handle_proxy_rule(rule, action, token, ssl);
     }else if ("*:"+action.port in hostfilters){//rule of the form "*:port"
       rule=hostfilters['*:'+action.port];
-      action=handle_proxy_rule(rule, action, token);
+      action=handle_proxy_rule(rule, action, token, ssl);
     }else if ("*" in hostfilters){//default rule "*"
       rule=hostfilters['*'];
-      action=handle_proxy_rule(rule, action, token);
+      action=handle_proxy_rule(rule, action, token, ssl);
     }
     return action;
 }
@@ -203,6 +210,14 @@ function action_redirect(response, host){
   util.log("Redirecting to " + host);
   response.writeHead(301,{
     'Location': "http://"+host
+  });
+  response.end();
+}
+
+function action_forcessl(response, host, url){
+  util.log("Enforcing ssl on " + host + "/" + url);
+  response.writeHead(301,{
+    'Location': "https://"+host+url
   });
   response.end();
 }
@@ -330,7 +345,7 @@ function server_cb(request, response) {
   authorization = authenticate(request);
   
   //calc new host info
-  var action = handle_proxy_route(request.headers.host, authorization);
+  var action = handle_proxy_route(request.headers.host, authorization, request.ssl);
   host = encode_host(action);
   
   //handle action
@@ -340,6 +355,16 @@ function server_cb(request, response) {
     action_proxy(response, request, host);
   } else if(action.action == "authenticate"){
     action_authenticate(response, action.msg);
+  }
+  else if(action.action == "forcessl"){
+    action_forcessl(response, request.headers.host, request.url);
+  }
+}
+
+function server_cb_builder(ssl){
+  return function(req, res){
+    req.ssl = ssl;
+    server_cb(req, res);
   }
 }
 
@@ -360,7 +385,7 @@ update_hostfilters();
 //http
 config.listen.forEach(function(listen){
   util.log("Starting reverse proxy server on port '" + listen.ip+':'+listen.port);
-  http.createServer(server_cb).listen(listen.port, listen.ip); 
+  http.createServer(server_cb_builder(false)).listen(listen.port, listen.ip); 
 });
 
 //httpS
@@ -371,6 +396,6 @@ config.listen_ssl.forEach(function(listen){
     key: listen.key,
     ca: listen.ca
   }
-  https.createServer(options, server_cb).listen(listen.port, listen.ip); 
+  https.createServer(options, server_cb_builder(true)).listen(listen.port, listen.ip); 
 });
 
